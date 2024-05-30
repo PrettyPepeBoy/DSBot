@@ -1,0 +1,4 @@
+environment: "local"
+discord_bot:
+  token: "MTI0NDkyMjA4OTE1NzE2NTA4OA.GtZjfW.gv0s3kR2VDRjY8Hfz0d2NJOB8NcgrW8T5if-tY"
+  prefix: "!Bot_Iluha"
