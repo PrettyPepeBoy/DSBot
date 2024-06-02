@@ -12,8 +12,9 @@ type Config struct {
 }
 
 type DiscordBot struct {
-	Token  string `yaml:"token"`
-	Prefix string `yaml:"prefix"`
+	Token        string `yaml:"token"`
+	Prefix       string `yaml:"prefix"`
+	DefaultState bool   `yaml:"default_state"`
 }
 
 func MustSetupConfig() Config {
