@@ -2,84 +2,130 @@ package discordbot
 
 import (
 	"DiscordBot/config"
+	"DiscordBot/internal/discordbot/dsErrors"
+	"bytes"
 	"errors"
+	"fmt"
 	"github.com/bwmarrin/discordgo"
 	"log/slog"
+	"net/http"
+	"net/mail"
 	"strconv"
 	"strings"
 )
 
 type BotState struct {
-	Request      []string
-	DefaultState bool
-	RequestState bool
-	TriesCount   int
+	RequestPipeline []string
+	DefaultState    bool
+	RequestState    bool
+	TriesCount      int
 }
 
+type UserData struct {
+	email    string
+	password string
+}
+
+const triesAmount = 3
+
 var state = BotState{DefaultState: true}
+var u = UserData{}
 
 var discordHandlers = map[string]func(s *discordgo.Session, m *discordgo.MessageCreate, log *slog.Logger, state *BotState){
 	"register": func(s *discordgo.Session, m *discordgo.MessageCreate, log *slog.Logger, state *BotState) {
+
 		_, err := s.ChannelMessageSend(m.ChannelID, "начат процесс регистрации")
 		if err != nil {
 			failedMessageOccurred(log, err, "registerHandler")
 		}
-		_, err = s.ChannelMessageSend(m.ChannelID, "пожалуйста, введи ваш email")
+
+		_, err = s.ChannelMessageSend(m.ChannelID, "пожалуйста, введите ваш email")
 		if err != nil {
 			failedMessageOccurred(log, err, "registerHandler")
 		}
 
-		state.RequestState = true
-		state.Request = []string{"email", "password"}
+		state.setRequestStateTrue()
+		state.RequestPipeline = []string{"email", "password"}
+		log.Info("request pipeline", state.RequestPipeline)
 	},
 	"email": func(s *discordgo.Session, m *discordgo.MessageCreate, log *slog.Logger, state *BotState) {
-		//todo убрать s и m из getMail
-		err := getMail(s, m, log, m.Content)
+		emailAddress, err := getMail(log, m.Content)
+
 		if err != nil {
-			_, err = s.ChannelMessageSend(m.ChannelID, "емейл не прошел проверку, введите его еще раз")
+			_, err = s.ChannelMessageSend(m.ChannelID, "емейл не корректен, попробуйте еще раз")
 			if err != nil {
 				failedMessageOccurred(log, err, "emailHandler")
 			}
-			state.TriesCount++
-			if state.TriesCount == 3 {
+			state.triesUp()
+			if checkTries(state) {
 				_, err = s.ChannelMessageSend(m.ChannelID, "количество попыток закончилось")
 				if err != nil {
 					failedMessageOccurred(log, err, "emailHandler")
 				}
-				state.RequestState = false
+				state.setRequestStateFalse()
+				return
 			}
+			_, err = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("осталось |%v| попыток", triesAmount-state.TriesCount))
 			return
 		}
-		state.Request = state.Request[1:]
-		if len(state.Request) == 0 {
+
+		u.email = emailAddress
+		if empty := state.checkRequestPipeline(); empty {
+			_, err = s.ChannelMessageSend(m.ChannelID, "процесс завершен")
+			if err != nil {
+				failedMessageOccurred(log, err, "passwordHandler")
+			}
 			log.Info("finish request pipeline")
-			state.RequestState = false
 			return
 		}
-		log.Info("request pipeline", state.Request)
+
+		log.Info("request pipeline", state.RequestPipeline)
 
 		_, err = s.ChannelMessageSend(m.ChannelID, "пожалуйста, введите ваш Пароль")
-
 		if err != nil {
 			failedMessageOccurred(log, err, "emailHandler")
 		}
 	},
 	"password": func(s *discordgo.Session, m *discordgo.MessageCreate, log *slog.Logger, state *BotState) {
-		err := getPassword(s, m, log, m.Content)
+		err := getPassword(log, m.Content)
 		if err != nil {
-			_, err = s.ChannelMessageSend(m.ChannelID, "пароль не верный, введите его еще раз")
+			if errors.Is(err, dsErrors.ErrPasswordTooBig) {
+				_, err = s.ChannelMessageSend(m.ChannelID, "пароль не верный, введите его еще раз")
+				if err != nil {
+					failedMessageOccurred(log, err, "passwordHandler")
+				}
+
+				_, err = s.ChannelMessageSend(m.ChannelID, "возникла ошибка : "+dsErrors.ErrPasswordTooBig.Error())
+				if err != nil {
+					failedMessageOccurred(log, err, "passwordHandler")
+				}
+				return
+			}
+
+			if errors.Is(err, dsErrors.ErrPasswordTooShort) {
+				_, err = s.ChannelMessageSend(m.ChannelID, "пароль не верный, введите его еще раз")
+				if err != nil {
+					failedMessageOccurred(log, err, "passwordHandler")
+				}
+
+				_, err = s.ChannelMessageSend(m.ChannelID, "возникла ошибка : "+dsErrors.ErrPasswordTooShort.Error())
+				if err != nil {
+					failedMessageOccurred(log, err, "passwordHandler")
+				}
+				return
+			}
+		}
+
+		if empty := state.checkRequestPipeline(); empty {
+			_, err = s.ChannelMessageSend(m.ChannelID, "процесс завершен")
 			if err != nil {
 				failedMessageOccurred(log, err, "passwordHandler")
 			}
-			return
-		}
-		state.Request = state.Request[1:]
-		if len(state.Request) == 0 {
-			state.RequestState = false
 			log.Info("finish request pipeline")
 			return
 		}
-		log.Info("request pipeline", state.Request)
+
+		log.Info("request pipeline", state.RequestPipeline)
 	},
 }
 
@@ -119,14 +165,11 @@ func InitHandlers(cfg config.Config, log *slog.Logger) func(s *discordgo.Session
 			}
 			getHandler(s, m, str[1], log, &state)
 		} else {
-			_, err := s.ChannelMessageSend(m.ChannelID, "мы в текущем состоянии")
-			if err != nil {
-				failedMessageOccurred(log, err, op)
-			}
+			log.Info("bot in request state now")
 			if m.Author.ID == s.State.User.ID {
 				return
 			}
-			getHandler(s, m, state.Request[0], log, &state)
+			getHandler(s, m, state.RequestPipeline[0], log, &state)
 		}
 	}
 }
@@ -146,58 +189,41 @@ func getHandler(s *discordgo.Session, m *discordgo.MessageCreate, handler string
 	fn(s, m, log, state)
 }
 
-func getMail(s *discordgo.Session, m *discordgo.MessageCreate, log *slog.Logger, mail string) error {
-	var emailSuffixes = []string{"@gmail.com", "@mail.ru", "@yandex.ru"}
-	const op = "discordbot/getMail"
+func getMail(log *slog.Logger, request string) (string, error) {
+	e, err := mail.ParseAddress(request)
 
-	for i, elem := range emailSuffixes {
-		if strings.HasSuffix(mail, elem) {
-			break
-		}
-		if i == len(emailSuffixes)-1 {
-			log.Info("incorrect email suffix", slog.String("mail", mail))
-			_, err := s.ChannelMessageSend(m.ChannelID, "ваш email некоректный")
-			if err != nil {
-				failedMessageOccurred(log, err, op)
-			}
-			return errors.New("incorrect email")
-		}
-	}
-	if len(mail) < 8 {
-		log.Info("Email to short")
-		_, err := s.ChannelMessageSend(m.ChannelID, "ваш email слишком короткий")
-		if err != nil {
-			failedMessageOccurred(log, err, op)
-			return errors.New("incorrect email")
-		}
-	}
-	if len(mail) > 30 {
-		log.Info("Email to big")
-		_, err := s.ChannelMessageSend(m.ChannelID, "ваш email слишком длинный")
-		if err != nil {
-			failedMessageOccurred(log, err, op)
-			return errors.New("incorrect email")
-		}
-	}
-
-	log.Info("successfully parse mail", slog.String("mail", mail))
-	_, err := s.ChannelMessageSend(m.ChannelID, "ваш email успешно добавлен в базу")
 	if err != nil {
-		failedMessageOccurred(log, err, op)
-		return nil
+		return "", dsErrors.ErrInvalidEmailAddress
 	}
-	return nil
+
+	reqWordsCache, err := http.NewRequest(http.MethodPost, "http://localhost:8081/cache/words", bytes.NewBuffer([]byte(e.Address)))
+
+	if err != nil {
+		log.Error("failed to create reqWordsCache", slog.String("error", err.Error()))
+		return "", err
+	}
+
+	client := http.Client{}
+
+	_, err = client.Do(reqWordsCache)
+	if err != nil {
+		log.Error("failed to do request to words", slog.String("error", err.Error()))
+		return "", err
+	}
+
+	log.Info("successfully parse mail", slog.String("email", request))
+	return e.Address, nil
 }
 
-func getPassword(s *discordgo.Session, m *discordgo.MessageCreate, log *slog.Logger, password string) error {
+func getPassword(log *slog.Logger, password string) error {
 	if len(password) < 8 {
 		log.Info("password to short")
-		return errors.New("password to short")
+		return dsErrors.ErrPasswordTooShort
 	}
 
-	if len(password) > 30 {
+	if len(password) > 20 {
 		log.Info("password to big")
-		return errors.New("password to big")
+		return dsErrors.ErrPasswordTooBig
 	}
 
 	return nil
@@ -206,4 +232,32 @@ func getPassword(s *discordgo.Session, m *discordgo.MessageCreate, log *slog.Log
 func failedMessageOccurred(log *slog.Logger, err error, op string) {
 	log.Info("failed to send message to channel", slog.String("op", op))
 	log.Error("error occurred", slog.String("error", err.Error()))
+}
+
+func (b *BotState) setRequestStateTrue() {
+	b.RequestState = true
+}
+
+func (b *BotState) setRequestStateFalse() {
+	b.RequestState = false
+}
+
+func checkTries(b *BotState) bool {
+	if b.TriesCount == triesAmount {
+		return true
+	}
+	return false
+}
+
+func (b *BotState) triesUp() {
+	b.TriesCount++
+}
+
+func (b *BotState) checkRequestPipeline() bool {
+	b.RequestPipeline = b.RequestPipeline[1:]
+	if len(b.RequestPipeline) == 0 {
+		b.setRequestStateFalse()
+		return true
+	}
+	return false
 }

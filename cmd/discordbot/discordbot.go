@@ -4,13 +4,22 @@ import (
 	"DiscordBot/config"
 	"DiscordBot/internal/discordbot"
 	"context"
+	"fmt"
 	"github.com/bwmarrin/discordgo"
 	"log/slog"
+	"os"
 )
 
 func MustStartSession(ctx context.Context, cfg config.Config, log *slog.Logger) {
 	const op = "discordbot/MustStartSession"
-	sess, err := discordgo.New("Bot " + cfg.DiscordBot.Token)
+
+	env := os.Getenv("DSBOT_TOKEN")
+	if env == "" {
+		fmt.Println("DSBOT_TOKEN is not set")
+		os.Exit(1)
+	}
+
+	sess, err := discordgo.New("Bot " + env)
 	if err != nil {
 		log.Info("failed to start session with discord bot", slog.String("op", op))
 		log.Error("error occurred", slog.String("error", err.Error()))
